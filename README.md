@@ -2,7 +2,7 @@
 
 ## File Structure:
 
-'''
+
 # SkyGuard Multi-Modal Drone Detection System
 ## Complete Project File Structure
 
