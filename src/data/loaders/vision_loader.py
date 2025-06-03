@@ -1,5 +1,6 @@
 # VisDrone to YOLO Format Converter
 # File: src/data/loaders/vision_loader.py
+# Run from project root: python src/data/loaders/vision_loader.py
 
 import os
 import shutil
@@ -11,7 +12,7 @@ from tqdm import tqdm
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 class VisDroneToYOLO:
@@ -25,8 +26,7 @@ class VisDroneToYOLO:
     4. Generate dataset configuration files
     """
     
-    def __init__(self, visdrone_root="data/raw/vision/visdrone", 
-                 yolo_output="data/processed/vision/visdrone_yolo"):
+    def __init__(self, visdrone_root=None, yolo_output=None):
         """
         Initialize the converter
         
@@ -34,8 +34,17 @@ class VisDroneToYOLO:
             visdrone_root (str): Path to VisDrone dataset
             yolo_output (str): Path for YOLO formatted output
         """
-        self.visdrone_root = Path(visdrone_root)
-        self.yolo_output = Path(yolo_output)
+        # Get project root (where script is run from)
+        self.project_root = Path.cwd()
+        
+        # Set default paths relative to project root
+        if visdrone_root is None:
+            visdrone_root = "data/raw/vision/visdrone"
+        if yolo_output is None:
+            yolo_output = "data/processed/vision/visdrone_yolo"
+            
+        self.visdrone_root = self.project_root / visdrone_root
+        self.yolo_output = self.project_root / yolo_output
         
         # VisDrone class mapping (excluding ignored regions)
         # Original: 0=ignored, 1=pedestrian, 2=people, 3=bicycle, 4=car, 5=van, 
@@ -62,6 +71,7 @@ class VisDroneToYOLO:
             'truck', 'tricycle', 'awning-tricycle', 'bus', 'motor'
         ]
         
+        logger.info(f"📁 Project root: {self.project_root}")
         logger.info(f"📁 VisDrone root: {self.visdrone_root}")
         logger.info(f"📁 YOLO output: {self.yolo_output}")
         logger.info(f"🏷️ Classes: {len(self.class_names)} ({', '.join(self.class_names)})")
@@ -84,7 +94,7 @@ class VisDroneToYOLO:
         
         for dir_path in dirs_to_create:
             dir_path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"✅ Created: {dir_path}")
+            logger.info(f"✅ Created: {dir_path.relative_to(self.project_root)}")
     
     def convert_bbox_format(self, bbox, img_width, img_height):
         """
@@ -300,31 +310,6 @@ class VisDroneToYOLO:
         
         logger.info(f"✅ Created classes.txt at {classes_path}")
     
-    def create_file_lists(self):
-        """
-        Create train.txt, val.txt, test.txt files with image paths
-        """
-        logger.info("📋 Creating file lists...")
-        
-        for split in ['train', 'val', 'test']:
-            images_dir = self.yolo_output / "images" / split
-            
-            if not images_dir.exists():
-                continue
-            
-            # Get all image files
-            image_files = list(images_dir.glob("*.jpg"))
-            
-            # Create file list
-            file_list_path = self.yolo_output / f"{split}.txt"
-            with open(file_list_path, 'w') as f:
-                for img_path in sorted(image_files):
-                    # Write relative path from dataset root
-                    rel_path = img_path.relative_to(self.yolo_output)
-                    f.write(f"{rel_path}\n")
-            
-            logger.info(f"✅ Created {split}.txt with {len(image_files)} images")
-    
     def validate_conversion(self):
         """
         Validate the converted dataset
@@ -367,73 +352,6 @@ class VisDroneToYOLO:
         
         return validation_results
     
-    def get_dataset_statistics(self):
-        """
-        Generate statistics about the converted dataset
-        """
-        logger.info("📊 Generating dataset statistics...")
-        
-        stats = {
-            'total_images': 0,
-            'total_objects': 0,
-            'class_counts': {class_name: 0 for class_name in self.class_names},
-            'split_stats': {}
-        }
-        
-        for split in ['train', 'val', 'test']:
-            labels_dir = self.yolo_output / "labels" / split
-            
-            if not labels_dir.exists():
-                continue
-            
-            split_objects = 0
-            split_class_counts = {class_name: 0 for class_name in self.class_names}
-            
-            label_files = list(labels_dir.glob("*.txt"))
-            
-            for label_file in label_files:
-                with open(label_file, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            parts = line.split()
-                            if len(parts) >= 5:
-                                class_id = int(parts[0])
-                                if 0 <= class_id < len(self.class_names):
-                                    class_name = self.class_names[class_id]
-                                    split_class_counts[class_name] += 1
-                                    split_objects += 1
-            
-            stats['split_stats'][split] = {
-                'images': len(label_files),
-                'objects': split_objects,
-                'class_counts': split_class_counts
-            }
-            
-            stats['total_images'] += len(label_files)
-            stats['total_objects'] += split_objects
-            
-            for class_name, count in split_class_counts.items():
-                stats['class_counts'][class_name] += count
-        
-        # Print statistics
-        logger.info("📈 DATASET STATISTICS:")
-        logger.info("=" * 50)
-        logger.info(f"Total images: {stats['total_images']}")
-        logger.info(f"Total objects: {stats['total_objects']}")
-        logger.info(f"Average objects per image: {stats['total_objects']/stats['total_images']:.1f}")
-        
-        logger.info("\nClass distribution:")
-        for class_name, count in stats['class_counts'].items():
-            percentage = count / stats['total_objects'] * 100 if stats['total_objects'] > 0 else 0
-            logger.info(f"  • {class_name}: {count} ({percentage:.1f}%)")
-        
-        logger.info("\nSplit breakdown:")
-        for split, split_stats in stats['split_stats'].items():
-            logger.info(f"  • {split.upper()}: {split_stats['images']} images, {split_stats['objects']} objects")
-        
-        return stats
-    
     def convert_full_dataset(self):
         """
         Convert the complete VisDrone dataset to YOLO format
@@ -455,13 +373,9 @@ class VisDroneToYOLO:
         
         # Step 3: Create configuration files
         self.create_dataset_yaml()
-        self.create_file_lists()
         
         # Step 4: Validate conversion
         validation_results = self.validate_conversion()
-        
-        # Step 5: Generate statistics
-        stats = self.get_dataset_statistics()
         
         logger.info("🎉 CONVERSION COMPLETE!")
         logger.info("=" * 60)
@@ -476,21 +390,18 @@ class VisDroneToYOLO:
         else:
             logger.warning(f"⚠️ Conversion completed with {total_errors} errors")
         
-        return stats
+        return validation_results
 
 
 def quick_test_conversion():
     """
-    Quick test function to convert a small subset for testing
+    Quick test function to convert validation set only for testing
     """
-    print("🧪 QUICK TEST: Converting small subset for validation")
+    print("🧪 QUICK TEST: Converting validation set only")
     print("=" * 60)
     
     # Create a test converter
-    converter = VisDroneToYOLO(
-        visdrone_root="data/raw/vision/visdrone",
-        yolo_output="data/processed/vision/visdrone_yolo_test"
-    )
+    converter = VisDroneToYOLO()
     
     # Test conversion on validation set only (smallest)
     converter.create_directory_structure()
@@ -498,13 +409,12 @@ def quick_test_conversion():
     
     if converted > 0:
         converter.create_dataset_yaml()
-        converter.create_file_lists()
         converter.validate_conversion()
         
         print(f"\n✅ Quick test completed successfully!")
-        print(f"📁 Test output: {converter.yolo_output}")
+        print(f"📁 Output: {converter.yolo_output}")
         print(f"🔍 Check the output to verify conversion is working correctly")
-        print(f"🚀 If everything looks good, run full conversion")
+        print(f"🚀 If everything looks good, run full conversion with --full")
     else:
         print(f"\n❌ Quick test failed - check your data paths")
 
@@ -516,20 +426,32 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Convert VisDrone to YOLO format")
-    parser.add_argument("--test", action="store_true", help="Run quick test conversion")
-    parser.add_argument("--visdrone-root", default="data/raw/vision/visdrone", 
-                       help="Path to VisDrone dataset")
-    parser.add_argument("--output", default="data/processed/vision/visdrone_yolo",
-                       help="Output path for YOLO dataset")
+    parser.add_argument("--test", action="store_true", 
+                       help="Run quick test conversion (val set only)")
+    parser.add_argument("--full", action="store_true", 
+                       help="Run full dataset conversion")
+    parser.add_argument("--visdrone-root", default=None,
+                       help="Path to VisDrone dataset (default: data/raw/vision/visdrone)")
+    parser.add_argument("--output", default=None,
+                       help="Output path for YOLO dataset (default: data/processed/vision/visdrone_yolo)")
     
     args = parser.parse_args()
     
     if args.test:
         quick_test_conversion()
-    else:
+    elif args.full:
         # Full conversion
         converter = VisDroneToYOLO(args.visdrone_root, args.output)
-        stats = converter.convert_full_dataset()
+        converter.convert_full_dataset()
+    else:
+        # Default: show help
+        print("🔄 VisDrone to YOLO Converter")
+        print("=" * 40)
+        print("Usage:")
+        print("  python src/data/loaders/vision_loader.py --test    # Quick test")
+        print("  python src/data/loaders/vision_loader.py --full    # Full conversion")
+        print()
+        print("💡 Start with --test to verify everything works!")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # YOLO Drone Detection Training Script
 # File: training/vision/train_detector.py
+# Run from project root: python training/vision/train_detector.py
 
 import os
 import yaml
@@ -12,7 +13,7 @@ from datetime import datetime
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 class DroneDetectionTrainer:
@@ -28,7 +29,7 @@ class DroneDetectionTrainer:
     """
     
     def __init__(self, 
-                 dataset_path="data/processed/vision/visdrone_yolo",
+                 dataset_path=None,
                  model_name="yolo11n.pt",
                  project_name="skyguard_drone_detection",
                  experiment_name=None):
@@ -41,7 +42,14 @@ class DroneDetectionTrainer:
             project_name (str): Project name for organizing runs
             experiment_name (str): Specific experiment name
         """
-        self.dataset_path = Path(dataset_path)
+        # Get project root
+        self.project_root = Path.cwd()
+        
+        # Set default dataset path
+        if dataset_path is None:
+            dataset_path = "data/processed/vision/visdrone_yolo"
+        self.dataset_path = self.project_root / dataset_path
+        
         self.model_name = model_name
         self.project_name = project_name
         self.experiment_name = experiment_name or f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -50,10 +58,11 @@ class DroneDetectionTrainer:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
         # Results directory
-        self.results_dir = Path("results") / self.project_name / self.experiment_name
+        self.results_dir = self.project_root / "results" / self.project_name / self.experiment_name
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"🚀 DroneDetectionTrainer initialized")
+        logger.info(f"📁 Project root: {self.project_root}")
         logger.info(f"📁 Dataset: {self.dataset_path}")
         logger.info(f"🤖 Model: {self.model_name}")
         logger.info(f"💻 Device: {self.device}")
@@ -72,6 +81,7 @@ class DroneDetectionTrainer:
         dataset_yaml = self.dataset_path / "dataset.yaml"
         if not dataset_yaml.exists():
             logger.error(f"❌ Dataset config not found: {dataset_yaml}")
+            logger.info("💡 Run data conversion first: python src/data/loaders/vision_loader.py --full")
             return False
         
         # Load and validate dataset config
@@ -95,6 +105,10 @@ class DroneDetectionTrainer:
                 # Count images
                 image_count = len(list(images_dir.glob("*.jpg")))
                 logger.info(f"✅ {split}: {image_count} images")
+                
+                if image_count == 0:
+                    logger.error(f"❌ No images found in {split} set")
+                    return False
         
         logger.info(f"✅ Dataset validation passed")
         logger.info(f"📊 Classes: {config['nc']} ({', '.join(config['names'])})")
@@ -125,7 +139,8 @@ class DroneDetectionTrainer:
                 logger.info("✅ Loaded model architecture (no pretrained weights)")
             
             # Model info
-            logger.info(f"📊 Model parameters: {sum(p.numel() for p in model.model.parameters()):,}")
+            param_count = sum(p.numel() for p in model.model.parameters())
+            logger.info(f"📊 Model parameters: {param_count:,}")
             
             return model
             
@@ -173,7 +188,7 @@ class DroneDetectionTrainer:
             'save_period': save_period,
             'patience': patience,
             'device': self.device,
-            'project': str(Path("runs") / "detect"),
+            'project': str(self.project_root / "runs" / "detect"),
             'name': f"{self.project_name}_{self.experiment_name}",
             'exist_ok': True,
             'pretrained': True,
@@ -224,8 +239,11 @@ class DroneDetectionTrainer:
         
         # Save best model
         best_model_path = self.results_dir / "best.pt"
-        model.save(str(best_model_path))
-        logger.info(f"✅ Saved best model: {best_model_path}")
+        try:
+            model.save(str(best_model_path))
+            logger.info(f"✅ Saved best model: {best_model_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not save model: {e}")
         
         # Save training summary
         summary = {
@@ -279,17 +297,28 @@ class DroneDetectionTrainer:
         )
         
         # Extract key metrics
-        metrics = {
-            'mAP50': float(results.box.map50),
-            'mAP50-95': float(results.box.map),
-            'precision': float(results.box.mp),
-            'recall': float(results.box.mr),
-            'f1_score': 2 * (float(results.box.mp) * float(results.box.mr)) / (float(results.box.mp) + float(results.box.mr))
-        }
+        try:
+            metrics = {
+                'mAP50': float(results.box.map50),
+                'mAP50-95': float(results.box.map),
+                'precision': float(results.box.mp),
+                'recall': float(results.box.mr),
+            }
+            # Calculate F1 score
+            if metrics['precision'] > 0 and metrics['recall'] > 0:
+                metrics['f1_score'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'])
+            else:
+                metrics['f1_score'] = 0.0
+        except Exception as e:
+            logger.warning(f"⚠️ Could not extract metrics: {e}")
+            metrics = {'error': str(e)}
         
         logger.info("📊 Validation Results:")
         for metric, value in metrics.items():
-            logger.info(f"   • {metric}: {value:.4f}")
+            if isinstance(value, float):
+                logger.info(f"   • {metric}: {value:.4f}")
+            else:
+                logger.info(f"   • {metric}: {value}")
         
         # Save validation results
         val_results_path = self.results_dir / f"validation_{split}_results.yaml"
@@ -313,6 +342,10 @@ class DroneDetectionTrainer:
         if model_path is None:
             model_path = self.results_dir / "best.pt"
         
+        if not Path(model_path).exists():
+            logger.warning(f"⚠️ Model not found: {model_path}")
+            return
+        
         model = YOLO(str(model_path))
         
         # Get test images
@@ -322,64 +355,46 @@ class DroneDetectionTrainer:
                 test_images = list(test_dir.glob("*.jpg"))[:6]  # First 6 images
             else:
                 val_dir = self.dataset_path / "images" / "val"
-                test_images = list(val_dir.glob("*.jpg"))[:6]  # Use val images
+                if val_dir.exists():
+                    test_images = list(val_dir.glob("*.jpg"))[:6]  # Use val images
+                else:
+                    logger.warning("⚠️ No test images found")
+                    return
         
         if not test_images:
             logger.warning("⚠️ No test images found")
             return
         
+        logger.info(f"🖼️ Testing on {len(test_images)} images")
+        
         # Run inference
-        results = model(test_images, conf=conf_threshold, save=True, save_txt=True)
-        
-        # Create visualization
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-        
-        for i, (img_path, result) in enumerate(zip(test_images[:6], results[:6])):
-            if i >= 6:
-                break
+        try:
+            results = model(test_images, conf=conf_threshold, save=True, save_txt=True)
             
-            # Plot result
-            im_array = result.plot()  # Plot with bounding boxes
-            axes[i].imshow(im_array)
-            axes[i].set_title(f"{Path(img_path).name}\n{len(result.boxes)} detections")
-            axes[i].axis('off')
-        
-        plt.tight_layout()
-        plt.savefig(self.results_dir / "inference_samples.png", dpi=150, bbox_inches='tight')
-        plt.show()
-        
-        logger.info(f"✅ Inference test completed")
-        logger.info(f"📸 Sample results saved to: {self.results_dir}/inference_samples.png")
-    
-    def export_model(self, model_path=None, formats=['onnx', 'torchscript']):
-        """
-        Export model for deployment
-        
-        Args:
-            model_path (str): Path to model weights
-            formats (list): Export formats
-        """
-        logger.info("📦 Exporting model for deployment...")
-        
-        # Load model
-        if model_path is None:
-            model_path = self.results_dir / "best.pt"
-        
-        model = YOLO(str(model_path))
-        
-        # Export to different formats
-        export_dir = self.results_dir / "exports"
-        export_dir.mkdir(exist_ok=True)
-        
-        for format_name in formats:
-            try:
-                exported_path = model.export(format=format_name, imgsz=640)
-                logger.info(f"✅ Exported {format_name}: {exported_path}")
-            except Exception as e:
-                logger.error(f"❌ Failed to export {format_name}: {e}")
-        
-        logger.info(f"📦 Model exports saved to: {export_dir}")
+            # Create visualization
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            axes = axes.flatten()
+            
+            for i, (img_path, result) in enumerate(zip(test_images[:6], results[:6])):
+                if i >= 6:
+                    break
+                
+                # Plot result
+                im_array = result.plot()  # Plot with bounding boxes
+                axes[i].imshow(im_array)
+                axes[i].set_title(f"{Path(img_path).name}\n{len(result.boxes)} detections")
+                axes[i].axis('off')
+            
+            plt.tight_layout()
+            inference_plot_path = self.results_dir / "inference_samples.png"
+            plt.savefig(inference_plot_path, dpi=150, bbox_inches='tight')
+            plt.show()
+            
+            logger.info(f"✅ Inference test completed")
+            logger.info(f"📸 Sample results saved to: {inference_plot_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Inference test failed: {e}")
 
 
 def quick_training_test():
@@ -395,14 +410,14 @@ def quick_training_test():
         experiment_name="quick_test"
     )
     
-    # Quick training (just 5 epochs)
+    # Quick training (just 3 epochs)
     try:
         model, results = trainer.train(
-            epochs=5,
+            epochs=3,
             imgsz=640,
             batch_size=8,  # Small batch for testing
             patience=50,   # No early stopping for quick test
-            save_period=5  # Save only at the end
+            save_period=1  # Save every epoch for quick test
         )
         
         print("✅ Quick training test completed!")
@@ -411,10 +426,10 @@ def quick_training_test():
         # Quick validation
         metrics = trainer.validate_model()
         
-        if metrics:
+        if metrics and 'error' not in metrics:
             print("📊 Quick test results:")
-            print(f"   • mAP50: {metrics['mAP50']:.3f}")
-            print(f"   • mAP50-95: {metrics['mAP50-95']:.3f}")
+            print(f"   • mAP50: {metrics.get('mAP50', 'N/A'):.3f}")
+            print(f"   • mAP50-95: {metrics.get('mAP50-95', 'N/A'):.3f}")
         
         print("🧪 Testing inference...")
         trainer.test_inference()
@@ -472,9 +487,6 @@ def main():
     
     # Test inference
     trainer.test_inference()
-    
-    # Export model
-    trainer.export_model()
     
     print("🎉 Training pipeline completed!")
 
